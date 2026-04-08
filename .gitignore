@@ -183,3 +183,13 @@ venv/
 
 # vscode specific files
 .vscode/
+
+# Project brief (internal planning document)
+together-ai-mcp-project-brief.md
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment
+.env

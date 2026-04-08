@@ -1,0 +1,27 @@
+{
+  "name": "together-ai-mcp",
+  "version": "1.0.0",
+  "description": "MCP server exposing Together AI inference endpoints — chat, image generation, vision, and embeddings — as tools callable from Claude, Cursor, and any MCP-compatible client.",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/index.test.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "together-ai",
+    "llm",
+    "claude",
+    "ai"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "openai": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
