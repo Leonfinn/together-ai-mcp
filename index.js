@@ -46,7 +46,7 @@ export function createHandlers(client, imageOutputDir, fetchFn = fetch, apiKey =
       messages,
       system,
       temperature = 0.7,
-      max_tokens = 4096,
+      max_tokens = 8192,
     }) {
       if (!prompt && !messages) {
         throw new Error('Either prompt or messages must be provided');
@@ -74,9 +74,12 @@ export function createHandlers(client, imageOutputDir, fetchFn = fetch, apiKey =
       }
 
       const message = completion.choices[0].message;
-      // Reasoning models fill message.reasoning during chain-of-thought and
-      // leave message.content empty. Fall back to reasoning if content is empty.
-      const text = message.content || message.reasoning || '';
+      // Together AI reasoning models use different fields depending on the model family:
+      //   message.content           — standard + Qwen (may contain inline <think> tags)
+      //   message.reasoning_content — DeepSeek-style format
+      //   message.reasoning         — Together AI format (GLM-5, MiniMax, Kimi)
+      // content is preferred; fall through to reasoning fields if empty.
+      const text = message.content || message.reasoning_content || message.reasoning || '';
       const u = completion.usage;
       const usageNote = `\n\nTokens used: prompt=${u?.prompt_tokens ?? 0}, completion=${u?.completion_tokens ?? 0}, total=${u?.total_tokens ?? 0}`;
 
@@ -140,6 +143,8 @@ export function createHandlers(client, imageOutputDir, fetchFn = fetch, apiKey =
 
     /**
      * Analyse an image using a Together AI vision model.
+     * Uses raw fetch (same as image generation) for better error visibility and
+     * explicit stream:false, which is required by Together AI's vision models.
      * Accepts either a public URL or a local file path.
      * When a local file is used, the MIME type is inferred from the file extension.
      */
@@ -163,25 +168,40 @@ export function createHandlers(client, imageOutputDir, fetchFn = fetch, apiKey =
         throw new Error('Either image_url or image_path must be provided');
       }
 
-      const completion = await client.chat.completions.create({
-        model,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: imageUrl } },
-            ],
-          },
-        ],
-        max_tokens,
+      const response = await fetchFn('https://api.together.xyz/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: imageUrl } },
+              ],
+            },
+          ],
+          max_tokens,
+          stream: false,
+        }),
       });
 
-      if (!completion.choices?.length) {
-        throw new Error('API returned no choices');
+      if (!response.ok) {
+        const errBody = await response.text();
+        throw new Error(`Vision API error ${response.status}: ${errBody.slice(0, 200)}`);
       }
 
-      return { content: [{ type: 'text', text: completion.choices[0].message.content || '' }] };
+      const data = await response.json();
+
+      if (!data.choices?.[0]) {
+        throw new Error('Vision API returned no choices');
+      }
+
+      return { content: [{ type: 'text', text: data.choices[0].message.content || '' }] };
     },
 
     /**

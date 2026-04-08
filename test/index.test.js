@@ -48,11 +48,9 @@ describe('together_chat', () => {
     assert.match(result.content[0].text, /Hello from content/);
   });
 
-  it('falls back to message.reasoning when message.content is empty (reasoning model fix)', async () => {
-    // Critical fix: reasoning models (GLM-5, Qwen3.5-397B, etc.) exhaust
-    // max_tokens during chain-of-thought, leaving content empty but
-    // populating message.reasoning. Without this fallback, the response
-    // is silently empty.
+  it('falls back to message.reasoning when message.content is empty (GLM-5 / Kimi format)', async () => {
+    // Reasoning models (GLM-5, MiniMax, Kimi K2.5) exhaust max_tokens during
+    // chain-of-thought, leaving content empty but populating message.reasoning.
     client.chat.completions.create.mock.mockImplementation(async () => ({
       choices: [{ message: { content: '', reasoning: 'Step 1: think carefully...' } }],
       usage: { prompt_tokens: 10, completion_tokens: 200, total_tokens: 210 },
@@ -65,6 +63,37 @@ describe('together_chat', () => {
 
     assert.equal(result.content[0].type, 'text');
     assert.match(result.content[0].text, /Step 1: think carefully/);
+  });
+
+  it('falls back to message.reasoning_content when content and reasoning are empty (DeepSeek format)', async () => {
+    client.chat.completions.create.mock.mockImplementation(async () => ({
+      choices: [{ message: { content: '', reasoning: '', reasoning_content: 'DeepSeek chain of thought' } }],
+      usage: { prompt_tokens: 10, completion_tokens: 200, total_tokens: 210 },
+    }));
+
+    const result = await handlers.together_chat({
+      prompt: 'Reason through this',
+      model: 'deepseek-ai/DeepSeek-R1',
+    });
+
+    assert.match(result.content[0].text, /DeepSeek chain of thought/);
+  });
+
+  it('returns content with inline <think> tags when present (Qwen format)', async () => {
+    const contentWithThink = '<think>Let me reason...</think>The final answer is 42.';
+    client.chat.completions.create.mock.mockImplementation(async () => ({
+      choices: [{ message: { content: contentWithThink } }],
+      usage: { prompt_tokens: 10, completion_tokens: 100, total_tokens: 110 },
+    }));
+
+    const result = await handlers.together_chat({
+      prompt: 'What is 6 * 7?',
+      model: 'Qwen/Qwen3.5-397B-A17B',
+    });
+
+    // Full content including think tags is returned
+    assert.match(result.content[0].text, /The final answer is 42/);
+    assert.match(result.content[0].text, /<think>/);
   });
 
   it('throws when neither prompt nor messages is provided', async () => {
@@ -166,7 +195,7 @@ describe('together_chat', () => {
     assert.equal(callArgs.model, 'meta-llama/Llama-3.3-70B-Instruct-Turbo');
   });
 
-  it('uses default max_tokens of 4096 (required headroom for reasoning models)', async () => {
+  it('uses default max_tokens of 8192 (required headroom for reasoning models)', async () => {
     client.chat.completions.create.mock.mockImplementation(async () => ({
       choices: [{ message: { content: 'ok' } }],
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
@@ -175,7 +204,7 @@ describe('together_chat', () => {
     await handlers.together_chat({ prompt: 'hi' });
 
     const callArgs = client.chat.completions.create.mock.calls[0].arguments[0];
-    assert.equal(callArgs.max_tokens, 4096);
+    assert.equal(callArgs.max_tokens, 8192);
   });
 
   it('handles gracefully when both content and reasoning are empty', async () => {
@@ -364,16 +393,26 @@ describe('together_generate_image', () => {
 });
 
 // ─── together_vision ──────────────────────────────────────────────────────────
+// Vision now uses raw fetch (same as image generation) so all tests use mockFetch.
 
 describe('together_vision', () => {
   let client;
+  let mockFetch;
   let tmpDir;
   let handlers;
 
+  function mockVisionResponse(text) {
+    mockFetch.mock.mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: text } }] }),
+    }));
+  }
+
   beforeEach(() => {
     client = makeMockClient();
+    mockFetch = mock.fn();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tog-vision-'));
-    handlers = createHandlers(client, tmpDir, undefined, 'test-key');
+    handlers = createHandlers(client, tmpDir, mockFetch, 'test-key');
   });
 
   afterEach(() => {
@@ -382,9 +421,7 @@ describe('together_vision', () => {
   });
 
   it('sends image_url in the correct message content structure', async () => {
-    client.chat.completions.create.mock.mockImplementation(async () => ({
-      choices: [{ message: { content: 'I see a red sports car.' } }],
-    }));
+    mockVisionResponse('I see a red sports car.');
 
     const result = await handlers.together_vision({
       prompt: 'What is in this image?',
@@ -395,18 +432,42 @@ describe('together_vision', () => {
     assert.equal(result.content[0].type, 'text');
     assert.equal(result.content[0].text, 'I see a red sports car.');
 
-    const callArgs = client.chat.completions.create.mock.calls[0].arguments[0];
-    const msgContent = callArgs.messages[0].content;
-    assert.deepEqual(msgContent, [
+    const [, options] = mockFetch.mock.calls[0].arguments;
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.messages[0].content, [
       { type: 'text', text: 'What is in this image?' },
       { type: 'image_url', image_url: { url: 'https://example.com/car.jpg' } },
     ]);
+    assert.equal(body.model, 'meta-llama/Llama-3.2-11B-Vision-Instruct');
+  });
+
+  it('sends stream:false in the request body', async () => {
+    mockVisionResponse('ok');
+
+    await handlers.together_vision({
+      prompt: 'Describe.',
+      image_url: 'https://example.com/img.jpg',
+    });
+
+    const [, options] = mockFetch.mock.calls[0].arguments;
+    const body = JSON.parse(options.body);
+    assert.equal(body.stream, false);
+  });
+
+  it('posts to the correct Together AI chat completions endpoint', async () => {
+    mockVisionResponse('ok');
+
+    await handlers.together_vision({
+      prompt: 'Describe.',
+      image_url: 'https://example.com/img.jpg',
+    });
+
+    const [url] = mockFetch.mock.calls[0].arguments;
+    assert.equal(url, 'https://api.together.xyz/v1/chat/completions');
   });
 
   it('reads a PNG file and creates correct data:image/png data URL', async () => {
-    client.chat.completions.create.mock.mockImplementation(async () => ({
-      choices: [{ message: { content: 'A test image.' } }],
-    }));
+    mockVisionResponse('A test image.');
 
     const fakeImagePath = path.join(tmpDir, 'test-image.png');
     const fakeImageData = Buffer.from('FAKE_PNG_BYTES');
@@ -417,47 +478,44 @@ describe('together_vision', () => {
       image_path: fakeImagePath,
     });
 
-    const callArgs = client.chat.completions.create.mock.calls[0].arguments[0];
-    const imageContent = callArgs.messages[0].content[1];
+    const [, options] = mockFetch.mock.calls[0].arguments;
+    const body = JSON.parse(options.body);
+    const imageContent = body.messages[0].content[1];
     assert.equal(imageContent.type, 'image_url');
     const expectedB64 = fakeImageData.toString('base64');
     assert.equal(imageContent.image_url.url, `data:image/png;base64,${expectedB64}`);
   });
 
   it('uses image/jpeg MIME type for .jpg files (not hardcoded to png)', async () => {
-    client.chat.completions.create.mock.mockImplementation(async () => ({
-      choices: [{ message: { content: 'A JPEG image.' } }],
-    }));
+    mockVisionResponse('A JPEG image.');
 
     const jpegPath = path.join(tmpDir, 'photo.jpg');
     fs.writeFileSync(jpegPath, Buffer.from('FAKE_JPEG_DATA'));
 
     await handlers.together_vision({ prompt: 'Describe.', image_path: jpegPath });
 
-    const callArgs = client.chat.completions.create.mock.calls[0].arguments[0];
-    const imageContent = callArgs.messages[0].content[1];
+    const [, options] = mockFetch.mock.calls[0].arguments;
+    const body = JSON.parse(options.body);
+    const imageContent = body.messages[0].content[1];
     assert.match(imageContent.image_url.url, /^data:image\/jpeg;base64,/);
   });
 
   it('uses image/webp MIME type for .webp files', async () => {
-    client.chat.completions.create.mock.mockImplementation(async () => ({
-      choices: [{ message: { content: 'A WebP image.' } }],
-    }));
+    mockVisionResponse('A WebP image.');
 
     const webpPath = path.join(tmpDir, 'image.webp');
     fs.writeFileSync(webpPath, Buffer.from('FAKE_WEBP_DATA'));
 
     await handlers.together_vision({ prompt: 'Describe.', image_path: webpPath });
 
-    const callArgs = client.chat.completions.create.mock.calls[0].arguments[0];
-    const imageContent = callArgs.messages[0].content[1];
+    const [, options] = mockFetch.mock.calls[0].arguments;
+    const body = JSON.parse(options.body);
+    const imageContent = body.messages[0].content[1];
     assert.match(imageContent.image_url.url, /^data:image\/webp;base64,/);
   });
 
   it('returns the model response text', async () => {
-    client.chat.completions.create.mock.mockImplementation(async () => ({
-      choices: [{ message: { content: 'This is a golden retriever.' } }],
-    }));
+    mockVisionResponse('This is a golden retriever.');
 
     const result = await handlers.together_vision({
       prompt: 'What breed of dog?',
@@ -474,21 +532,33 @@ describe('together_vision', () => {
     );
   });
 
-  it('throws when API returns empty choices array', async () => {
-    client.chat.completions.create.mock.mockImplementation(async () => ({
-      choices: [],
+  it('throws with status and body snippet when API returns non-OK status', async () => {
+    mockFetch.mock.mockImplementation(async () => ({
+      ok: false,
+      status: 422,
+      text: async () => '{"error":{"message":"Model does not support vision"}}',
     }));
 
     await assert.rejects(
       () => handlers.together_vision({ prompt: 'test', image_url: 'https://example.com/img.jpg' }),
-      /API returned no choices/
+      /Vision API error 422/
     );
   });
 
-  it('passes max_tokens to the API', async () => {
-    client.chat.completions.create.mock.mockImplementation(async () => ({
-      choices: [{ message: { content: 'ok' } }],
+  it('throws when API returns empty choices', async () => {
+    mockFetch.mock.mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ choices: [] }),
     }));
+
+    await assert.rejects(
+      () => handlers.together_vision({ prompt: 'test', image_url: 'https://example.com/img.jpg' }),
+      /Vision API returned no choices/
+    );
+  });
+
+  it('passes max_tokens in the request body', async () => {
+    mockVisionResponse('ok');
 
     await handlers.together_vision({
       prompt: 'Describe.',
@@ -496,8 +566,9 @@ describe('together_vision', () => {
       max_tokens: 512,
     });
 
-    const callArgs = client.chat.completions.create.mock.calls[0].arguments[0];
-    assert.equal(callArgs.max_tokens, 512);
+    const [, options] = mockFetch.mock.calls[0].arguments;
+    const body = JSON.parse(options.body);
+    assert.equal(body.max_tokens, 512);
   });
 });
 
