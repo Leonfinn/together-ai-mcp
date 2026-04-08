@@ -133,9 +133,35 @@ Generate text embeddings for RAG and retrieval pipelines.
 
 ---
 
-## Supported models
+## Models
 
-### Chat / Reasoning
+The server works with **any model available on Together AI's serverless API** — just pass its model ID. No configuration changes are needed.
+
+The tables below list the models I personally use. They are provided as a reference, not as a hard limit.
+
+### Finding model IDs
+
+Browse all available models at [api.together.ai/models](https://api.together.ai/models). Each model's page shows its exact ID string. Pass that ID as the `model` parameter to any tool:
+
+```json
+{
+  "tool": "together_chat",
+  "params": {
+    "model": "any-model-id-from-together-ai",
+    "prompt": "Hello"
+  }
+}
+```
+
+The only constraint is that image generation models must be called via `together_generate_image`, vision models via `together_vision`, and embedding models via `together_embed` — you cannot call an image model through `together_chat`.
+
+> **Dedicated endpoints:** Some models (e.g. `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`) require a dedicated endpoint rather than the serverless API. Calling these via this server will return a 400 error from Together AI.
+
+---
+
+### Models I use
+
+#### Chat / Reasoning
 
 | Model | ID | Notes |
 |---|---|---|
@@ -148,9 +174,7 @@ Generate text embeddings for RAG and retrieval pipelines.
 | Kimi K2.5 | `moonshotai/Kimi-K2.5` | Reasoning model — requires fix above |
 | Qwen 2.5 7B | `Qwen/Qwen2.5-7B-Instruct-Turbo` | Lightweight / low cost |
 
-> **Note:** `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8` requires a dedicated endpoint and is not available via the serverless API. Calling it will return a 400 error.
-
-### Image generation
+#### Image generation
 
 | Model | ID |
 |---|---|
@@ -158,14 +182,14 @@ Generate text embeddings for RAG and retrieval pipelines.
 | FLUX.1-dev | `black-forest-labs/FLUX.1-dev` |
 | Stable Diffusion XL | `stabilityai/stable-diffusion-xl-base-1.0` |
 
-### Vision
+#### Vision
 
 | Model | ID |
 |---|---|
 | Llama 3.2 11B Vision | `meta-llama/Llama-3.2-11B-Vision-Instruct` |
 | Qwen 2.5 VL 72B | `Qwen/Qwen2.5-VL-72B-Instruct` |
 
-### Embeddings
+#### Embeddings
 
 | Model | ID |
 |---|---|
