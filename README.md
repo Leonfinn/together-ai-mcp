@@ -4,26 +4,55 @@ A Node.js [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server
 
 ## Why this exists
 
-I created this MCP due to an issue I was having accessing reasoning models through Together AI.
+I created this MCP due to several issues I was having accessing models through Together AI.
 
-Together AI's largest reasoning models (GLM-5, Qwen3.5-397B, MiniMax M2.5, Kimi K2.5) use a non-standard response format. During chain-of-thought generation, these models write their reasoning trace into `choices[0].message.reasoning` while leaving `choices[0].message.content` as an **empty string**. The final answer only appears in `message.content` once thinking is complete.
+### 1. Reasoning model silent empty responses
 
-The problem: the OpenAI SDK — which is the standard way to call Together AI's API — sets a default `max_tokens` of 2048. For reasoning models, this budget is exhausted during the thinking phase, so `message.content` is **never populated**. You get charged for tokens, no error is raised, and the response is silently empty.
+Together AI's largest reasoning models (GLM-5, Qwen3.5-397B, MiniMax M2.5, Kimi K2.5) write their chain-of-thought into non-standard response fields, and they exhaust the OpenAI SDK's default token budget before producing a final answer.
 
-Any code that reads only `message.content` (which is every other Together AI MCP implementation I could find) returns nothing when called against these models. The failure is completely silent: no exception, no error response, just an empty string.
+Two problems compound each other:
 
-The fix applied in this server is straightforward once you know what's happening:
+**Token budget exhaustion.** The OpenAI SDK sets a default `max_tokens` of 2048. For reasoning models, this budget is consumed entirely by the thinking phase — `message.content` is never populated. You get charged for tokens, no error is raised, and the response is silently empty.
+
+**Fragmented response fields.** Different model families on Together AI write their output to different fields:
+
+| Field | Used by |
+|---|---|
+| `message.content` | Standard models; Qwen (inline `<think>` tags) |
+| `message.reasoning_content` | DeepSeek-style format |
+| `message.reasoning` | Together AI format (GLM-5, MiniMax, Kimi) |
+
+Any code that only reads `message.content` — or even `message.content \|\| message.reasoning` — silently returns an empty string for some models.
 
 ```js
-// Standard approach — broken for reasoning models:
-const text = completion.choices[0].message.content;
-
-// Fixed approach — works for all models:
-const message = completion.choices[0].message;
+// Broken — misses reasoning_content (DeepSeek format):
 const text = message.content || message.reasoning || '';
+
+// Fixed — covers all Together AI reasoning model formats:
+const text = message.content || message.reasoning_content || message.reasoning || '';
 ```
 
-The default `max_tokens` is also raised from 2048 to 4096 to give reasoning models enough budget to complete their chain of thought before producing a final answer.
+The default `max_tokens` is raised to 8192 to give reasoning models enough budget to complete their chain of thought before producing a final answer.
+
+### 2. Vision model failures
+
+Using the OpenAI SDK's `chat.completions.create()` for vision requests fails silently against Together AI's vision API. Together AI requires `stream: false` to be set explicitly; the SDK may not send it. When it does fail, the SDK error contains no response body, making the root cause invisible.
+
+```js
+// Broken — SDK may omit stream:false; errors are opaque:
+const response = await openai.chat.completions.create({ model, messages });
+
+// Fixed — raw fetch, explicit stream:false, full error body in exception:
+const response = await fetch('https://api.together.xyz/v1/chat/completions', {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ model, messages, max_tokens, stream: false }),
+});
+if (!response.ok) {
+  const body = await response.text();
+  throw new Error(`Vision API error ${response.status}: ${body.slice(0, 200)}`);
+}
+```
 
 ---
 
@@ -90,7 +119,7 @@ Call any Together AI chat or reasoning model.
 | `messages` | array | — | Multi-turn `[{role, content}]` array |
 | `system` | string | — | System prompt (used with `prompt` only) |
 | `temperature` | number | `0.7` | 0.0–2.0 |
-| `max_tokens` | integer | `4096` | Raised from SDK default to support reasoning models |
+| `max_tokens` | integer | `8192` | Raised from SDK default to give reasoning models enough budget for chain-of-thought |
 
 ### `together_generate_image`
 
